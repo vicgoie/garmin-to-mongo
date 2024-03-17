@@ -13,16 +13,17 @@ from garminconnect import (
     GarminConnectTooManyRequestsError,
     GarminConnectAuthenticationError,
 )
+load_dotenv()
 
 garmin_user = os.getenv("GARMIN_USER")
 garmin_pass = os.getenv("GARMIN_PASS")
-mongodb_uri = os.getenv("MONGODB_URI")
+mongodb_uri = os.getenv("MONGODB_URI_SERVER")
 cliente_mongo = MongoClient(mongodb_uri)
 base_datos = cliente_mongo.get_database("HealthDB")
 coleccion_health_stats = base_datos["health_stats"]
 coleccion_activities = base_datos["activities"]
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.ERROR)
 logger = logging.getLogger(__name__)
 
 BROKER_HOST = os.getenv("BROKER_HOST")
@@ -42,12 +43,9 @@ def send_mqtt_message_garmin_stats(message):
 def send_mqtt_message_garmin_activity(message):
     mqtt_client.publish(BROKER_TOPIC_ACTIVITY, message)
 
-def send_mqtt_message_garmin_status(message):
-    mqtt_client.publish(BROKER_TOPIC_STATS, message)
-
 today = datetime.date.today()
-print(today)
-lastweek = today - datetime.timedelta(days=7)
+yesterday = today - datetime.timedelta(days=1)
+#print(today)
 
 def main():
     try:
@@ -55,45 +53,51 @@ def main():
         api.login()
 
         try:
-            stats_data = api.get_stats(today)
-            coleccion_health_stats.insert_one(stats_data)
-            if not coleccion_health_stats.find_one({"uuid": stats_data["uuid"]}):
-                # El campo "uuid" no existe, por lo que puedes insertar el documento
-                coleccion_health_stats.insert_one(stats_data)
-                print("Datos insertados correctamente en la colección health_stats.")
-                send_mqtt_message_garmin_stats("0")
+            stats_data = api.get_stats(yesterday)
+            if stats_data["uuid"] is not None:
+                if not coleccion_health_stats.find_one({"uuid": stats_data["uuid"]}):
+                    # El campo "uuid" no existe, por lo que puedes insertar el documento
+                    coleccion_health_stats.insert_one(stats_data)
+                    print("Datos insertados correctamente en la colección health_stats.")
+                    send_mqtt_message_garmin_stats("0")
+                else:
+                    print("El campo 'uuid' ya existe en la colección. No se realizará la inserción.")
+                    send_mqtt_message_garmin_stats("2")
             else:
-                print("El campo 'uuid' ya existe en la colección. No se realizará la inserción.")
-                send_mqtt_message_garmin_stats("2")
+                print("Este día no existe")
+                send_mqtt_message_garmin_stats("3")
 
         except (
             GarminConnectConnectionError,
             GarminConnectAuthenticationError,
             GarminConnectTooManyRequestsError,
         ) as err:
-            print(f"Error al obtener datos para el día {today}: {err}")
+            print(f"Error al obtener datos para el día {yesterday}: {err}")
             send_mqtt_message_garmin_stats("1")
         
-        actividades = api.get_last_activity()
-        # Verificar si el campo "activityId" no existe en la colección
-        if not coleccion_activities.find_one({"activityId": actividades["activityId"]}):
-            try:
-                # El campo "activityId" no existe, por lo que puedes insertar la actividad
-                coleccion_activities.insert_one(actividades)
-                print("Datos insertados correctamente en la colección activities.")
-                send_mqtt_message_garmin_activity("0")
+        all_activities = api.get_activities(0, 2)  # Obtener hasta 2 actividades del día
+        all_activities.reverse()
 
-            except (
-                GarminConnectConnectionError,
-                GarminConnectAuthenticationError,
-                GarminConnectTooManyRequestsError,
-            ) as err:
-                print(f"Error al insertar datos para la actividad: {err}")
-                send_mqtt_message_garmin_activity("1")
+        for actividad in all_activities:
+            # Verificar si el campo "activityId" no existe en la colección
+            if not coleccion_activities.find_one({"activityId": actividad["activityId"]}):
+                try:
+                    # El campo "activityId" no existe, por lo que puedes insertar la actividad
+                    coleccion_activities.insert_one(actividad)
+                    print("Datos insertados correctamente en la colección activities.")
+                    send_mqtt_message_garmin_activity("0")
 
-        else:
-            print("El campo 'activityId' ya existe en la colección. No se realizará la inserción.")
-            send_mqtt_message_garmin_activity("2")
+                except (
+                    GarminConnectConnectionError,
+                    GarminConnectAuthenticationError,
+                    GarminConnectTooManyRequestsError,
+                ) as err:
+                    print(f"Error al insertar datos para la actividad: {err}")
+                    send_mqtt_message_garmin_activity("1")
+
+            else:
+                print("El campo 'activityId' ya existe en la colección. No se realizará la inserción.")
+                send_mqtt_message_garmin_activity("2")
 
     
     except (
